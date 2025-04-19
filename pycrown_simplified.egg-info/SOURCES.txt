@@ -1,0 +1,15 @@
+LICENSE.md
+MANIFEST.in
+README.md
+setup.py
+pycrown/__init__.py
+pycrown/_crown_dalponteCIRC_numba.py
+pycrown/_crown_dalponte_numba.py
+pycrown/_crown_hierarchical_region_growing.py
+pycrown/io_utils.py
+pycrown/pycrown.py
+pycrown_simplified.egg-info/PKG-INFO
+pycrown_simplified.egg-info/SOURCES.txt
+pycrown_simplified.egg-info/dependency_links.txt
+pycrown_simplified.egg-info/requires.txt
+pycrown_simplified.egg-info/top_level.txt

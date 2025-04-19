@@ -1,0 +1,9 @@
+conda env create -f environment.yaml
+conda activate pycrown
+pip install -e .
+
+conda deactivate
+conda env remove -n pycrown
+
+jupyter kernelspec list
+jupyter kernelspec uninstall oldenv
