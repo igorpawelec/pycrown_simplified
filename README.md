@@ -1,4 +1,5 @@
 # PyCrown Simplified
+<img src="https://raw.githubusercontent.com/igorpawelec/pycrown_simplified/main/www/pycrown_logo.png" align="right" width="120"/>
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
@@ -45,6 +46,7 @@ pip install pycrown-simplified
 git clone https://github.com/yourusername/pycrown_simplified.git
 cd pycrown_simplified
 pip install -e .
+```
 
 ## Dependencies:
 
@@ -57,12 +59,12 @@ pip install -e .
 - fiona ≥ 1.9
 
 You can also use Conda:
-
+```
 conda env create -f environment.yaml
 conda activate pycrown
-
+```
 ## Quickstart
-
+```
 import os
 import rasterio
 import matplotlib.pyplot as plt
@@ -104,7 +106,7 @@ with rasterio.open(chm_path) as src:
 
 save_segments(crowns, out_dir, "crowns", transform, crs_wkt, chm_array)
 save_tree_tops(tops, out_dir, "treetops", transform, crs_wkt, chm_array)
-
+```
 ## API
 
 PyCrown(chm_file: str)
