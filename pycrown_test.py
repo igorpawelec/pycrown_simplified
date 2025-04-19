@@ -169,7 +169,7 @@ plt.show()
 
 crowns = pc.hierarchical_crown_delineation(
     variance_thresh=2.0,
-    mask_thresh=0.0
+    mask_thresh=9.0
 )
 crs_wkt = src.crs.to_wkt()
 

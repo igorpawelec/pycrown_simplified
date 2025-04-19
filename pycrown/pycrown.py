@@ -237,34 +237,47 @@ class PyCrown:
 
         return self.tree_tops, self.crowns
 
-    def hierarchical_crown_delineation(self, variance_thresh=2.0, mask_thresh=0.):
+    def hierarchical_crown_delineation(self, variance_thresh: float = 2.0,
+                                       mask_thresh: float = 0.0) -> np.ndarray:
         """
         Nowa procedura: watershed + graf + region‑growing.
-        variance_thresh – granica wariancji (σ) w regionie,
-        mask_thresh     – globalny threshold na CHM do maski.
+        
+        Parameters
+        ----------
+        variance_thresh : float
+            Maksymalna dopuszczalna wariancja (σ) w regionie.
+        mask_thresh : float
+            Globalny threshold na CHM do wygenerowania maski (np. odcięcie gruntu).
+        
+        Returns
+        -------
+        crowns : ndarray[int32]
+            Obraz etykiet: każdy obiekt (korona) otrzymuje swoją wartość 1..N.
         """
-        # 1) jeśli nie wygładzone, wygładź („HRG” może potrzebować filtrowania)
+        # 1) jeśli nie ma jeszcze self.smoothed_chm, wygładź
         if self.smoothed_chm is None:
             self.smooth_chm(ws=3, method="median")
 
-        # 2) przygotuj seed-y w postaci listy pikseli
-        #    (konwertujemy nasze tree_tops na listę (row,col))
+        # 2) przygotuj listę seed-ów (row, col)
         seeds = [(int(r), int(c)) for r, c in self.tree_tops]
 
-        # 3) stwórz i uruchom HierarchicalRegionGrower
+        # 3) uruchom HierarchicalRegionGrower
         self._hrg = HierarchicalRegionGrower(
             chm_path=self.chm_file,
             smoothing=lambda arr: self.smoothed_chm
         )
-        crowns_masks = self._hrg.run_all(
+        masks = self._hrg.run_all(
             tree_tops_pixels=seeds,
-            variance_thresh=variance_thresh
+            variance_thresh=variance_thresh,
+            mask_thresh=mask_thresh
         )
 
-        # 4) scalamy binarne maski w etykiety 1..N
+        # 4) scal binarne maski w etykiety 1..N
         h, w = self.smoothed_chm.shape
         lbl = np.zeros((h, w), dtype=np.int32)
-        for i, m in enumerate(crowns_masks, start=1):
+        for i, m in enumerate(masks, start=1):
             lbl[m] = i
+
         self.crowns = lbl
-        return self.crowns
+        return lbl
+

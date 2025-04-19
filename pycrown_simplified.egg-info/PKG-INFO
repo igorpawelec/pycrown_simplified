@@ -2,10 +2,12 @@ Metadata-Version: 2.4
 Name: pycrown_simplified
 Version: 0.1
 Summary: Simplified tree crown segmentation using CHM
+Home-page: https://github.com/igorpawelec/pycrown_simplified
 Author: Igor Pawelec
 Author-email: igor.pawelec@student.urk.edu.pl
+License: GPLv3
 Classifier: Programming Language :: Python :: 3.12
-Classifier: License :: OSI Approved :: MIT License
+Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)
 Classifier: Operating System :: OS Independent
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -16,49 +18,56 @@ Requires-Dist: scikit-image>=0.20
 Requires-Dist: rasterio>=1.3
 Requires-Dist: numba>=0.60
 Requires-Dist: fiona>=1.9
+Requires-Dist: networkx>=3.0
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier
 Dynamic: description
 Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license
 Dynamic: license-file
 Dynamic: requires-dist
 Dynamic: requires-python
 Dynamic: summary
 
-# PyCrown – Fast Raster‑Based Individual Tree Segmentation for LiDAR Data
+# PyCrown Simplified
+<img src="https://raw.githubusercontent.com/igorpawelec/pycrown_simplified/main/www/pycrown_logo.png" align="right" width="120"/>
 
-Author: Igor Pawelec  
-Published under GNU GPLv3
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
+**Author:** Igor Pawelec  
+**Original implementation:** Dr. Jan Zörner et al. (2018) under GNU GPLv3  
+**This fork:** adds a novel hybrid watershed‑plus‑graph hierarchical region‑growing approach  
 
 ---
 
 ## Summary
 
-PyCrown is a lightweight Python package for  
-1. **Smoothing** a canopy height model (CHM)  
-2. **Detecting** tree tops  
-3. **Delineating** individual tree crowns using the Dalponte algorithm  
-4. **Exporting** results as raw/VRT rasters and GeoPackage vector layers  
+PyCrown is a Python toolkit for delineating individual tree crowns from a Canopy Height Model (CHM).  
+It implements:
 
-This is a simplified re‑implementation of [the original PyCrown](https://github.com/manaakiwhenua/pycrown), optimized for ease of use and integration into Python workflows.
+1. **CHM smoothing** (median, mean, Gaussian, maximum filters)  
+2. **Tree‑top detection** via local maxima + optional center‑of‑mass correction  
+3. **Dalponte crown delineation** in two modes:
+   - **standard**: raster‑based region growing  
+   - **circ**: circular (“CIRC”) variant for smoother crowns  
+4. **New hierarchical segmentation**: a hybrid watershed → region adjacency graph → region‑growing algorithm for especially challenging canopies  
+5. **I/O utilities** to export:
+   - raw segmentation mask (`.bin` + `.vrt`)  
+   - vectorized crowns & attributes to GeoPackage  
+   - tree‑top points to GeoPackage  
 
 ## Features
 
-- **CHM smoothing** with four filter options:  
-  – `median` (robust to noise)  
-  – `mean`/`average`  
-  – `gaussian` (controlled blur)  
-  – `maximum` (emphasize peaks)  
-- **Tree‑top detection** via local maxima + center‑of‑mass  
-- **Optional tree‑top correction** by clustering close maxima  
-- **Crown delineation** in two modes:  
-  – Standard Dalponte  
-  – Circular (“circ”) variant for smoother crown shapes  
-- **I/O utilities** to save:  
-  – Segmentation masks as raw `.bin` + `.vrt`  
-  – Crown polygons to GeoPackage  
-  – Tree‑top points to GeoPackage  
+- **Flexible smoothing**: choose among four filters to pre‑process your CHM  
+- **Robust peak detection**: cluster nearby maxima to correct false tree‑tops  
+- **Fast crown growing**: Cython + Numba back‑ends for both standard and circular Dalponte methods  
+- **Hierarchical region‑growing**  
+  - Watershed segmentation from seed markers  
+  - Build a Region Adjacency Graph (RAG) without external GIS libs  
+  - Iteratively merge/split basins to meet variance/compactness thresholds  
+- **Easy export**: save results as rasters or GeoPackage with crown attributes (max height, area, diameter)  
 
 ## Installation
 
@@ -70,8 +79,10 @@ pip install pycrown-simplified
 git clone https://github.com/yourusername/pycrown_simplified.git
 cd pycrown_simplified
 pip install -e .
+```
 
-# Dependencies:
+## Dependencies:
+
 - Python ≥ 3.12
 - numpy ≥ 1.23
 - scipy ≥ 1.9
@@ -80,92 +91,85 @@ pip install -e .
 - numba ≥ 0.60
 - fiona ≥ 1.9
 
-# You can also create a conda environment:
-
+You can also use Conda:
 ```
 conda env create -f environment.yaml
+conda activate pycrown
 ```
-
 ## Quickstart
-
 ```
 import os
-import numpy as np
 import rasterio
 import matplotlib.pyplot as plt
-from pycrown import PyCrown
-from pycrown.io_utils import (
-    save_segments,
-    vectorize_segments,
-    save_tree_tops
-)
+import numpy as np
 
-# Paths & parameters
-chm_path = "data/chm.tif"
-out_dir   = "results"
-base_name = os.path.splitext(os.path.basename(chm_path))[0]
+from pycrown import PyCrown
+from pycrown.io_utils import save_segments, save_tree_tops
+
+# Paths
+chm_path = "path/to/chm.tif"
+out_dir  = "results"
 os.makedirs(out_dir, exist_ok=True)
 
-# Read CHM
-with rasterio.open(chm_path) as src:
-    chm       = src.read(1)
-    transform = src.transform
-    crs_wkt   = src.crs.to_wkt()
-
-# Initialize
+# 1. Initialize and read CHM
 pc = PyCrown(chm_path)
 
-# 1. Smooth CHM
+# 2. Smooth CHM
 smoothed = pc.smooth_chm(ws=5, method="gaussian")
 
-# 2. Detect tree tops
-tops     = pc.tree_detection(hmin=2.0, ws=5)
-corrected = pc.correct_tree_tops(distance_threshold=5.0)
+# 3. Detect and correct tree‑tops
+raw_tops   = pc.tree_detection(hmin=2.0, ws=5)
+tops = pc.correct_tree_tops(distance_threshold=5.0)
 
-# 3. Delineate crowns
-crowns = pc.crown_delineation(
-    mode="circ",
-    th_seed=0.7,
-    th_crown=0.55,
-    th_tree=2.0,
-    max_crown=10.0
-)
+# 4. (Optional) Screen small trees
+pc.screen_small_trees(hmin=3.0)
 
-# 4. Save outputs
-save_segments(crowns, out_dir, base_name + "_crowns", transform, crs_wkt)
-vectorize_segments(crowns, out_dir, base_name + "_crowns", transform, crs_wkt)
-save_tree_tops(corrected, out_dir, base_name, transform, crs_wkt)
+# 5. Delineate crowns (use "circ" for smooth crowns)
+crowns = pc.crown_delineation(mode="circ",
+                              th_seed=0.7,
+                              th_crown=0.55,
+                              th_tree=2.0,
+                              max_crown=10.0)
 
+# 6. Save outputs
+with rasterio.open(chm_path) as src:
+    transform = src.transform
+    crs_wkt    = src.crs.to_wkt()
+    chm_array  = src.read(1)
+
+save_segments(crowns, out_dir, "crowns", transform, crs_wkt, chm_array)
+save_tree_tops(tops, out_dir, "treetops", transform, crs_wkt, chm_array)
 ```
-## API Reference
+## API
+
 PyCrown(chm_file: str)
 
-    smooth_chm(ws: int = 3, method: str = "median") → ndarray
-    Smooth the CHM.
+    smooth_chm(ws: int = 3, method: str = "median") → np.ndarray
 
     tree_detection(hmin: float = 2.0, ws: int = 3) → list[tuple]
-    Detect raw tree‑top positions.
 
-    correct_tree_tops(distance_threshold: float = 5.0) → ndarray
-    Merge nearby peaks into single tops.
+    correct_tree_tops(distance_threshold: float = 5.0) → np.ndarray
 
-    crown_delineation(mode: str = "standard", th_seed: float = 0.7, th_crown: float = 0.55, th_tree: float = 15.0, max_crown: float = 10.0) → ndarray
-    Label individual crowns.
+    screen_small_trees(hmin: float = 2.0) → (np.ndarray, np.ndarray)
 
-## I/O Utilities (pycrown.io_utils)
+    crown_delineation(mode: str, th_seed: float, th_crown: float, th_tree: float, max_crown: float) → np.ndarray
 
-- save_segments(segments, out_path, fname, transform, crs_wkt)
-Write raw .bin + .vrt.
+    hierarchical_crown_delineation(variance_thresh: float, mask_thresh: float) → np.ndarray
 
-- vectorize_segments(segments, out_path, fname, transform, crs_wkt)
-Export crown polygons to GeoPackage.
+See the docstrings for full details.
 
-- save_tree_tops(tree_tops, out_path, fname, transform, crs_wkt)
-Export detected tops as point GeoPackage.
+## Citation
+
+If you use PyCrown in your research, please cite the original implementation:
+
+    Zörner J., Dymond J.R., Shepherd J.D., Wiser S.K., Bunting P., Jolly B.
+    PyCrown – Fast raster-based individual tree segmentation for LiDAR data.
+    Landcare Research NZ Ltd. 2018. https://doi.org/10.7931/M0SR-DN55
+
+And acknowledge this fork’s novel hierarchical region‑growing approach:
+
+    Pawelec I. (2025) PyCrown Simplified: hybrid watershed + graph hierarchical segmentation.
 
 ## License
 
-This project is released under the GNU General Public License v3.0.
-
-Original implementation:
-https://github.com/manaakiwhenua/pycrown
+This project is licensed under the GNU General Public License v3.0. See LICENSE for details.
