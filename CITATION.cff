@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "PyCrown Simplified"
+version: 0.1.0
+date-released: "2025-04-19"
+authors:
+  - family-names: Pawelec
+    given-names: Igor
+    affiliation: "University of Agriculture in Kraków"
+repository-code: "https://github.com/igorpawelec/pycrown_simplified"
+license: GPL-3.0
+references:
+  - type: article
+    authors:
+      - family-names: Zörner
+        given-names: Jan
+    title: "PyCrown – Fast raster-based individual tree segmentation for LiDAR data"
+    year: 2018
+    doi: "10.7931/M0SR-DN55"

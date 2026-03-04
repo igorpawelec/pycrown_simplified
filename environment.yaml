@@ -12,5 +12,3 @@ dependencies:
   - fiona>=1.9
   - networkx>=3.0
   - pip
-  - pip:
-    - pycrown-simplified

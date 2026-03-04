@@ -9,7 +9,7 @@ This file is part of PyCrown Simplified.
 
 PyCrown Simplified is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
+the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
 PyCrown Simplified is distributed in the hope that it will be useful,
@@ -22,7 +22,6 @@ GNU General Public License for more details:
 __author__    = "Igor Pawelec"
 __copyright__ = "Copyright (C) 2025 Igor Pawelec"
 __license__   = "GPLv3"
-__version__   = "0.1"
 
 import numpy as np
 import rasterio
@@ -65,34 +64,32 @@ class PyCrown:
         method : str, optional
             Metoda wygładzania. Dostępne opcje:
               - "median": filtr medianowy (odporny na szumy),
-              - "mean" lub "average": filtr średniej (uniform filter), wygładzający bardziej agresywnie,
-              - "gaussian": filtr gaussowski, pozwalający na naturalne rozmycie (kontrolowane przez sigma),
-              - "maximum": filtr maksymalny, który wybiera największą wartość w oknie (może być użyteczny do określania lokalnych szczytów).
+              - "mean" lub "average": filtr średniej (uniform filter),
+              - "gaussian": filtr gaussowski,
+              - "maximum": filtr maksymalny.
+
         Returns
         -------
         ndarray
             Wygładzony CHM.
         """
-
         if method == "median":
             self.smoothed_chm = ndimage.median_filter(self.chm, size=ws)
         elif method in ("mean", "average"):
             self.smoothed_chm = ndimage.uniform_filter(self.chm, size=ws)
         elif method == "gaussian":
-            # Ustalamy sigma na podstawie rozmiaru okna – typowo sigma = ws/3
             sigma = ws / 3.0
             self.smoothed_chm = ndimage.gaussian_filter(self.chm, sigma=sigma)
         elif method == "maximum":
             self.smoothed_chm = ndimage.maximum_filter(self.chm, size=ws)
         else:
             raise ValueError(f"Nieznana metoda wygładzania: {method}")
-        
+
         return self.smoothed_chm
 
     def tree_detection(self, hmin=2, ws=3):
         """
         Wykrywa wierzchołki drzew w wygładzonym CHM.
-        Używa lokalnego filtru maksymalnego oraz center_of_mass.
 
         Parameters
         ----------
@@ -108,18 +105,17 @@ class PyCrown:
         """
         if self.smoothed_chm is None:
             self.smooth_chm(ws=ws)
-        # Wyznaczamy lokalne maksima
         local_max = ndimage.maximum_filter(self.smoothed_chm, size=ws)
         detected = (self.smoothed_chm == local_max) & (self.smoothed_chm > hmin)
         labels, num = ndimage.label(detected)
         centers = ndimage.center_of_mass(self.smoothed_chm, labels, range(1, num + 1))
         self.tree_tops = centers
         return centers
-    
+
     def correct_tree_tops(self, distance_threshold=5.0):
         """
         Korekta pozycji tree tops przez uśrednianie pozycji lokalnych maximów
-        w obrębie jednego drzewa (działa na self.tree_tops).
+        w obrębie jednego drzewa.
 
         Parameters
         ----------
@@ -132,15 +128,12 @@ class PyCrown:
         corrected_tops : ndarray, shape (m, 2)
             Skorygowane pozycje tree tops, gdzie m ≤ n.
         """
-        # Konwersja self.tree_tops na NumPy array, jeśli to lista
         tree_tops = self.tree_tops
         if not isinstance(tree_tops, np.ndarray):
             tree_tops = np.array(tree_tops)
 
         if tree_tops.shape[0] < 2:
             return tree_tops
-
-        from scipy.spatial.distance import cdist
 
         groups = []
         used = np.zeros(tree_tops.shape[0], dtype=bool)
@@ -175,29 +168,40 @@ class PyCrown:
         corrected_tops = np.array(corrected_list)
         self.tree_tops = corrected_tops
         return corrected_tops
-     
+
     def crown_delineation(self, mode="standard", th_seed=0.7, th_crown=0.55, th_tree=15.0, max_crown=10.0):
         """
-        Segmentuje korony drzew. Parametr 'mode' decyduje o wyborze algorytmu:
-          - "standard": klasyczna wersja Dalponte
-          - "circ": wersja kołowa (CIRC)
-        
-        Wymaga, aby CHM był już wygładzony (przez smooth_chm).
+        Segmentuje korony drzew metodą Dalponte.
+
+        Parameters
+        ----------
+        mode : str
+            "standard" lub "circ" (wersja kołowa).
+        th_seed : float
+            Threshold dla seed pixel.
+        th_crown : float
+            Threshold dla średniej wysokości korony.
+        th_tree : float
+            Minimalna wysokość drzewa.
+        max_crown : float
+            Maksymalny promień korony w pikselach.
+
+        Returns
+        -------
+        ndarray[int32]
+            Raster koron drzew.
         """
         if self.smoothed_chm is None:
             raise ValueError("CHM must be smoothed first using smooth_chm().")
-        
-        # Przyjmujemy, że wykryte tree tops są w postaci tablicy 2 x n pikseli.
-        # Tutaj dla uproszczenia załóżmy, że metoda tree_detection zwraca taką tablicę.
+
         if self.tree_tops is None:
             self.tree_tops = self.tree_detection()
-        # Przekształcamy współrzędne na int32 (pikselowe)
-        arr = np.array(self.tree_tops)          # shape (N,2) as (row, col)
-        Trees = np.vstack((np.floor(arr[:,0]),  # rows
-                   np.floor(arr[:,1]))).astype(np.int32)
-        # Upewnij się, że CHM jest w float32
+
+        arr = np.array(self.tree_tops)
+        Trees = np.vstack((np.floor(arr[:, 0]),
+                           np.floor(arr[:, 1]))).astype(np.int32)
         chm = self.smoothed_chm.astype(np.float32)
-        
+
         if mode == "standard":
             self.crowns = _crown_dalponte(chm, Trees, float(th_seed), float(th_crown), float(th_tree), float(max_crown))
         elif mode == "circ":
@@ -205,18 +209,21 @@ class PyCrown:
         else:
             raise ValueError("Mode must be 'standard' or 'circ'")
         return self.crowns
-    
+
     def screen_small_trees(self, hmin: float = 2.0):
         """
-        Po detekcji i segmentacji usuwa drzewa niższe niż hmin.
+        Usuwa drzewa niższe niż hmin.
 
-        Parametry
-        ---------
+        Parameters
+        ----------
         hmin : float
-            Minimalna wysokość drzewa (wartość CHM), poniżej której
-            wierzchołek jest odrzucany.
+            Minimalna wysokość drzewa.
+
+        Returns
+        -------
+        tuple
+            (tree_tops, crowns)
         """
-        # 1. odfiltrowanie tree_tops
         kept = []
         for pt in self.tree_tops:
             r, c = int(pt[0]), int(pt[1])
@@ -224,7 +231,6 @@ class PyCrown:
                 kept.append(pt)
         self.tree_tops = np.array(kept)
 
-        # 2. jeśli są już policzone korony, usuń piksele koron „małych” drzew
         if self.crowns is not None:
             new_label = 1
             new_crowns = np.zeros_like(self.crowns, dtype=np.int32)
@@ -240,28 +246,25 @@ class PyCrown:
     def hierarchical_crown_delineation(self, variance_thresh: float = 2.0,
                                        mask_thresh: float = 0.0) -> np.ndarray:
         """
-        Nowa procedura: watershed + graf + region‑growing.
-        
+        Nowa procedura: watershed + graf + region-growing.
+
         Parameters
         ----------
         variance_thresh : float
             Maksymalna dopuszczalna wariancja (σ) w regionie.
         mask_thresh : float
-            Globalny threshold na CHM do wygenerowania maski (np. odcięcie gruntu).
-        
+            Globalny threshold na CHM do wygenerowania maski.
+
         Returns
         -------
         crowns : ndarray[int32]
             Obraz etykiet: każdy obiekt (korona) otrzymuje swoją wartość 1..N.
         """
-        # 1) jeśli nie ma jeszcze self.smoothed_chm, wygładź
         if self.smoothed_chm is None:
             self.smooth_chm(ws=3, method="median")
 
-        # 2) przygotuj listę seed-ów (row, col)
         seeds = [(int(r), int(c)) for r, c in self.tree_tops]
 
-        # 3) uruchom HierarchicalRegionGrower
         self._hrg = HierarchicalRegionGrower(
             chm_path=self.chm_file,
             smoothing=lambda arr: self.smoothed_chm
@@ -272,7 +275,6 @@ class PyCrown:
             mask_thresh=mask_thresh
         )
 
-        # 4) scal binarne maski w etykiety 1..N
         h, w = self.smoothed_chm.shape
         lbl = np.zeros((h, w), dtype=np.int32)
         for i, m in enumerate(masks, start=1):
@@ -280,4 +282,3 @@ class PyCrown:
 
         self.crowns = lbl
         return lbl
-
