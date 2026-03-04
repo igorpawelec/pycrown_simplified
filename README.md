@@ -43,7 +43,7 @@ It implements:
 pip install pycrown-simplified
 
 # Or from source
-git clone https://github.com/yourusername/pycrown_simplified.git
+git clone https://github.com/igorpawelec/pycrown_simplified.git
 cd pycrown_simplified
 pip install -e .
 ```
