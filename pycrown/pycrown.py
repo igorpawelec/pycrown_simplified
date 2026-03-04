@@ -33,6 +33,7 @@ from ._crown_dalponteCIRC_numba import _crown_dalponteCIRC
 from ._crown_hierarchical_region_growing import HierarchicalRegionGrower
 from scipy.spatial.distance import cdist
 
+
 class PyCrown:
     def __init__(self, chm_file):
         """
@@ -60,7 +61,8 @@ class PyCrown:
         Parameters
         ----------
         ws : int, optional
-            Rozmiar okna filtra (domyślnie 3). Dla filtru gaussowskiego sigma zostanie ustawione jako ws/3.
+            Rozmiar okna filtra (domyślnie 3). Dla filtru gaussowskiego
+            sigma zostanie ustawione jako ws/3.
         method : str, optional
             Metoda wygładzania. Dostępne opcje:
               - "median": filtr medianowy (odporny na szumy),
@@ -169,7 +171,8 @@ class PyCrown:
         self.tree_tops = corrected_tops
         return corrected_tops
 
-    def crown_delineation(self, mode="standard", th_seed=0.7, th_crown=0.55, th_tree=15.0, max_crown=10.0):
+    def crown_delineation(self, mode="standard", th_seed=0.7, th_crown=0.55,
+                          th_tree=15.0, max_crown=10.0):
         """
         Segmentuje korony drzew metodą Dalponte.
 
@@ -203,9 +206,13 @@ class PyCrown:
         chm = self.smoothed_chm.astype(np.float32)
 
         if mode == "standard":
-            self.crowns = _crown_dalponte(chm, Trees, float(th_seed), float(th_crown), float(th_tree), float(max_crown))
+            self.crowns = _crown_dalponte(
+                chm, Trees, float(th_seed), float(th_crown),
+                float(th_tree), float(max_crown))
         elif mode == "circ":
-            self.crowns = _crown_dalponteCIRC(chm, Trees, float(th_seed), float(th_crown), float(th_tree), float(max_crown))
+            self.crowns = _crown_dalponteCIRC(
+                chm, Trees, float(th_seed), float(th_crown),
+                float(th_tree), float(max_crown))
         else:
             raise ValueError("Mode must be 'standard' or 'circ'")
         return self.crowns
@@ -243,22 +250,76 @@ class PyCrown:
 
         return self.tree_tops, self.crowns
 
-    def hierarchical_crown_delineation(self, variance_thresh: float = 2.0,
-                                       mask_thresh: float = 0.0) -> np.ndarray:
+    def hierarchical_crown_delineation(
+            self,
+            variance_thresh: float = 2.0,
+            mask_thresh: float = 0.0,
+            morpho_radius: int = 0,
+            alpha: float = 1.0,
+            beta: float = 0.5,
+            gamma: float = 0.1,
+            anneal_lambda: float = 1.0,
+            max_iters: int = 200,
+            n_jobs: int = 1
+    ) -> np.ndarray:
         """
-        Nowa procedura: watershed + graf + region-growing.
+        Hierarchical watershed + weighted RAG + Welford region-growing (v2).
+
+        This method implements all 7 improvements from the planning document:
+          1. Online statistics (Welford) — scalar merge, no array scans
+          2. Priority queue — O(log k) candidate selection
+          3. Parallel grows — optional multiprocessing per seed
+          4. Weighted RAG edges — α·|Δμ| + β·|Δσ| + γ·1/(border+1)
+          5. Morphological mask — binary opening/closing to clean mask
+          6. Variance annealing — λ-based threshold tightening
+          7. Numba @njit — accelerated graph build and statistics
 
         Parameters
         ----------
         variance_thresh : float
-            Maksymalna dopuszczalna wariancja (σ) w regionie.
+            Maximum allowed variance (σ²) within a grown region.
+            Higher = more permissive merging. Default 2.0.
         mask_thresh : float
-            Globalny threshold na CHM do wygenerowania maski.
+            Minimum CHM height for initial mask (ground rejection).
+            Default 0.0.
+        morpho_radius : int
+            Disk radius for morphological mask cleaning.
+            0 = no morphology (v1 compatible behavior).
+            Recommended: 2–3 for 1m resolution CHM.
+        alpha : float
+            Weight for mean height difference in RAG edges. Default 1.0.
+        beta : float
+            Weight for std deviation difference in RAG edges. Default 0.5.
+        gamma : float
+            Weight for inverse shared border length. Default 0.1.
+        anneal_lambda : float
+            Variance threshold annealing factor per iteration.
+            1.0 = constant threshold (v1 behavior).
+            <1.0 (e.g. 0.95) = threshold tightens, starting permissive
+            then consolidating. Default 1.0.
+        max_iters : int
+            Maximum grow iterations per seed. Default 200.
+        n_jobs : int
+            Number of parallel processes.
+            1 = sequential (v1 behavior).
+            -1 = use all CPU cores.
 
         Returns
         -------
         crowns : ndarray[int32]
-            Obraz etykiet: każdy obiekt (korona) otrzymuje swoją wartość 1..N.
+            Label image: each crown gets value 1..N, background = 0.
+
+        Notes
+        -----
+        For v1-compatible behavior, use default parameters (all improvements
+        are backward-compatible: morpho_radius=0, anneal_lambda=1.0, n_jobs=1).
+
+        For maximum performance on large rasters:
+            hierarchical_crown_delineation(
+                morpho_radius=2,
+                anneal_lambda=0.95,
+                n_jobs=-1
+            )
         """
         if self.smoothed_chm is None:
             self.smooth_chm(ws=3, method="median")
@@ -272,7 +333,14 @@ class PyCrown:
         masks = self._hrg.run_all(
             tree_tops_pixels=seeds,
             variance_thresh=variance_thresh,
-            mask_thresh=mask_thresh
+            mask_thresh=mask_thresh,
+            morpho_radius=morpho_radius,
+            alpha=alpha,
+            beta=beta,
+            gamma=gamma,
+            anneal_lambda=anneal_lambda,
+            max_iters=max_iters,
+            n_jobs=n_jobs
         )
 
         h, w = self.smoothed_chm.shape
