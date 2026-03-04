@@ -39,10 +39,6 @@ It implements:
 ## Installation
 
 ```bash
-# From PyPI
-pip install pycrown-simplified
-
-# Or from source
 git clone https://github.com/igorpawelec/pycrown_simplified.git
 cd pycrown_simplified
 pip install -e .
