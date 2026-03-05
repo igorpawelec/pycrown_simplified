@@ -25,9 +25,43 @@ __license__   = "GPLv3"
 
 import os
 import numpy as np
-import fiona
-from rasterio.features import shapes
-from skimage.morphology import binary_closing, disk
+
+
+# ── Lazy imports ──────────────────────────────────────────────────────
+
+def _ensure_fiona():
+    try:
+        import fiona
+        return fiona
+    except ImportError as e:
+        raise ImportError(
+            "fiona is required for vector I/O (GeoPackage export).\n"
+            "Install with:  conda install -c conda-forge fiona\n"
+            "Or:            pip install fiona"
+        ) from e
+    except OSError as e:
+        raise OSError(
+            "fiona found but failed to load (DLL/shared library error).\n"
+            "Fix:  conda install -c conda-forge fiona --force-reinstall\n"
+            f"Original error: {e}"
+        ) from e
+
+
+def _ensure_rasterio_features():
+    try:
+        from rasterio.features import shapes
+        return shapes
+    except ImportError as e:
+        raise ImportError(
+            "rasterio is required for raster vectorization.\n"
+            "Install with:  conda install -c conda-forge rasterio"
+        ) from e
+
+
+def _ensure_morphology():
+    from skimage.morphology import binary_closing, disk
+    return binary_closing, disk
+
 
 def save_segments(segments: np.ndarray,
                   out_path: str,
@@ -44,6 +78,8 @@ def save_segments(segments: np.ndarray,
     Jeśli closing_radius>0, na każdy segment nakładamy binary_closing
     z elementem strukturalnym disk(closing_radius), żeby wygładzić krawędzie.
     """
+    fiona = _ensure_fiona()
+    shapes = _ensure_rasterio_features()
 
     # --- 1) RAW dump (.bin) + VRT ---
     bin_path = os.path.join(out_path, f"{fname}.bin")
@@ -80,6 +116,10 @@ def save_segments(segments: np.ndarray,
     segment_ids = np.unique(segments)
     segment_ids = segment_ids[segment_ids != 0]
 
+    # Lazy morphology — only if needed
+    if closing_radius > 0:
+        binary_closing, disk = _ensure_morphology()
+
     with fiona.open(
         gpkg_path,
         'w',
@@ -115,6 +155,7 @@ def save_segments(segments: np.ndarray,
                     'properties': props
                 })
 
+
 def save_tree_tops(corrected_tops: np.ndarray,
                    out_path: str,
                    fname: str,
@@ -124,6 +165,8 @@ def save_tree_tops(corrected_tops: np.ndarray,
     """
     Zapis skorygowanych tree-tops do GeoPackage z kolumnami: id, height.
     """
+    fiona = _ensure_fiona()
+
     gpkg_path = os.path.join(out_path, fname + "_treetops.gpkg")
     schema = {
         'geometry': 'Point',

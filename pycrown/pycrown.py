@@ -24,31 +24,131 @@ __copyright__ = "Copyright (C) 2025 Igor Pawelec"
 __license__   = "GPLv3"
 
 import numpy as np
-import rasterio
-import scipy.ndimage as ndimage
-from skimage.segmentation import watershed
 
-from ._crown_dalponte_numba import _crown_dalponte
-from ._crown_dalponteCIRC_numba import _crown_dalponteCIRC
-from ._crown_hierarchical_region_growing import HierarchicalRegionGrower
-from scipy.spatial.distance import cdist
+# ── Lazy imports ──────────────────────────────────────────────────────
+# Heavy / C-extension deps are imported on first use, not at module load.
+# This prevents "DLL load failed" or "ModuleNotFoundError" from crashing
+# the entire package when only a subset of functionality is needed.
 
+_rasterio = None
+_ndimage = None
+_watershed = None
+_cdist = None
+
+
+def _ensure_rasterio():
+    global _rasterio
+    if _rasterio is None:
+        try:
+            import rasterio as _rio
+            _rasterio = _rio
+        except ImportError as e:
+            raise ImportError(
+                "rasterio is required for reading CHM files.\n"
+                "Install with:  conda install -c conda-forge rasterio\n"
+                "Or:            pip install rasterio"
+            ) from e
+        except OSError as e:
+            raise OSError(
+                "rasterio found but failed to load (DLL/shared library error).\n"
+                "This usually means a version mismatch between rasterio, "
+                "GDAL, and PROJ.\n"
+                "Fix:  conda install -c conda-forge rasterio --force-reinstall\n"
+                f"Original error: {e}"
+            ) from e
+    return _rasterio
+
+
+def _ensure_scipy():
+    global _ndimage, _cdist
+    if _ndimage is None:
+        import scipy.ndimage as ndi
+        _ndimage = ndi
+    if _cdist is None:
+        from scipy.spatial.distance import cdist
+        _cdist = cdist
+    return _ndimage, _cdist
+
+
+def _ensure_watershed():
+    global _watershed
+    if _watershed is None:
+        from skimage.segmentation import watershed
+        _watershed = watershed
+    return _watershed
+
+
+# ── Numba crown algorithms — also lazy ───────────────────────────────
+_crown_dalponte_fn = None
+_crown_dalponteCIRC_fn = None
+_HierarchicalRegionGrower = None
+
+
+def _ensure_dalponte():
+    global _crown_dalponte_fn
+    if _crown_dalponte_fn is None:
+        from ._crown_dalponte_numba import _crown_dalponte
+        _crown_dalponte_fn = _crown_dalponte
+    return _crown_dalponte_fn
+
+
+def _ensure_dalponteCIRC():
+    global _crown_dalponteCIRC_fn
+    if _crown_dalponteCIRC_fn is None:
+        from ._crown_dalponteCIRC_numba import _crown_dalponteCIRC
+        _crown_dalponteCIRC_fn = _crown_dalponteCIRC
+    return _crown_dalponteCIRC_fn
+
+
+def _ensure_hrg():
+    global _HierarchicalRegionGrower
+    if _HierarchicalRegionGrower is None:
+        from ._crown_hierarchical_region_growing import HierarchicalRegionGrower
+        _HierarchicalRegionGrower = HierarchicalRegionGrower
+    return _HierarchicalRegionGrower
+
+
+# ── Main class ────────────────────────────────────────────────────────
 
 class PyCrown:
-    def __init__(self, chm_file):
+    def __init__(self, chm_file=None, chm_array=None, transform=None, crs=None):
         """
-        Inicjalizuje obiekt PyCrown poprzez wczytanie CHM z podanej ścieżki.
+        Inicjalizuje obiekt PyCrown.
+
+        Dwa tryby:
+          1) Z pliku:   PyCrown("path/to/chm.tif")     — wymaga rasterio
+          2) Z tablicy: PyCrown(chm_array=arr, transform=t, crs=c)  — bez I/O
 
         Parameters
         ----------
-        chm_file : str
-            Ścieżka do pliku CHM (Canopy Height Model)
+        chm_file : str, optional
+            Ścieżka do pliku CHM (Canopy Height Model).
+        chm_array : ndarray, optional
+            CHM jako numpy array (2D, float32/float64).
+        transform : affine.Affine, optional
+            Geotransformacja (wymagana przy chm_array jeśli chcesz
+            eksportować wyniki).
+        crs : rasterio.crs.CRS or str, optional
+            Układ współrzędnych.
         """
+        if chm_file is not None and chm_array is not None:
+            raise ValueError("Podaj albo chm_file albo chm_array, nie oba.")
+
         self.chm_file = chm_file
-        with rasterio.open(chm_file) as src:
-            self.chm = src.read(1)
-            self.transform = src.transform
-            self.crs = src.crs
+
+        if chm_file is not None:
+            rasterio = _ensure_rasterio()
+            with rasterio.open(chm_file) as src:
+                self.chm = src.read(1)
+                self.transform = src.transform
+                self.crs = src.crs
+        elif chm_array is not None:
+            self.chm = np.asarray(chm_array)
+            self.transform = transform
+            self.crs = crs
+        else:
+            raise ValueError("Musisz podać chm_file lub chm_array.")
+
         self.smoothed_chm = None
         self.tree_tops = None
         self.crowns = None
@@ -64,17 +164,16 @@ class PyCrown:
             Rozmiar okna filtra (domyślnie 3). Dla filtru gaussowskiego
             sigma zostanie ustawione jako ws/3.
         method : str, optional
-            Metoda wygładzania. Dostępne opcje:
-              - "median": filtr medianowy (odporny na szumy),
-              - "mean" lub "average": filtr średniej (uniform filter),
-              - "gaussian": filtr gaussowski,
-              - "maximum": filtr maksymalny.
+            Metoda wygładzania: "median", "mean"/"average", "gaussian",
+            "maximum".
 
         Returns
         -------
         ndarray
             Wygładzony CHM.
         """
+        ndimage, _ = _ensure_scipy()
+
         if method == "median":
             self.smoothed_chm = ndimage.median_filter(self.chm, size=ws)
         elif method in ("mean", "average"):
@@ -105,6 +204,8 @@ class PyCrown:
         list of tuples
             Lista współrzędnych (wiersz, kolumna) wykrytych tree tops.
         """
+        ndimage, _ = _ensure_scipy()
+
         if self.smoothed_chm is None:
             self.smooth_chm(ws=ws)
         local_max = ndimage.maximum_filter(self.smoothed_chm, size=ws)
@@ -130,6 +231,8 @@ class PyCrown:
         corrected_tops : ndarray, shape (m, 2)
             Skorygowane pozycje tree tops, gdzie m ≤ n.
         """
+        _, cdist = _ensure_scipy()
+
         tree_tops = self.tree_tops
         if not isinstance(tree_tops, np.ndarray):
             tree_tops = np.array(tree_tops)
@@ -206,10 +309,12 @@ class PyCrown:
         chm = self.smoothed_chm.astype(np.float32)
 
         if mode == "standard":
+            _crown_dalponte = _ensure_dalponte()
             self.crowns = _crown_dalponte(
                 chm, Trees, float(th_seed), float(th_crown),
                 float(th_tree), float(max_crown))
         elif mode == "circ":
+            _crown_dalponteCIRC = _ensure_dalponteCIRC()
             self.crowns = _crown_dalponteCIRC(
                 chm, Trees, float(th_seed), float(th_crown),
                 float(th_tree), float(max_crown))
@@ -278,49 +383,26 @@ class PyCrown:
         ----------
         variance_thresh : float
             Maximum allowed variance (σ²) within a grown region.
-            Higher = more permissive merging. Default 2.0.
         mask_thresh : float
-            Minimum CHM height for initial mask (ground rejection).
-            Default 0.0.
+            Minimum CHM height for initial mask.
         morpho_radius : int
-            Disk radius for morphological mask cleaning.
-            0 = no morphology (v1 compatible behavior).
-            Recommended: 2–3 for 1m resolution CHM.
-        alpha : float
-            Weight for mean height difference in RAG edges. Default 1.0.
-        beta : float
-            Weight for std deviation difference in RAG edges. Default 0.5.
-        gamma : float
-            Weight for inverse shared border length. Default 0.1.
+            Disk radius for morphological mask cleaning. 0 = off.
+        alpha, beta, gamma : float
+            RAG edge weight coefficients.
         anneal_lambda : float
-            Variance threshold annealing factor per iteration.
-            1.0 = constant threshold (v1 behavior).
-            <1.0 (e.g. 0.95) = threshold tightens, starting permissive
-            then consolidating. Default 1.0.
+            Variance threshold annealing factor. 1.0 = constant.
         max_iters : int
-            Maximum grow iterations per seed. Default 200.
+            Maximum grow iterations per seed.
         n_jobs : int
-            Number of parallel processes.
-            1 = sequential (v1 behavior).
-            -1 = use all CPU cores.
+            Parallel processes. 1 = sequential, -1 = all cores.
 
         Returns
         -------
         crowns : ndarray[int32]
             Label image: each crown gets value 1..N, background = 0.
-
-        Notes
-        -----
-        For v1-compatible behavior, use default parameters (all improvements
-        are backward-compatible: morpho_radius=0, anneal_lambda=1.0, n_jobs=1).
-
-        For maximum performance on large rasters:
-            hierarchical_crown_delineation(
-                morpho_radius=2,
-                anneal_lambda=0.95,
-                n_jobs=-1
-            )
         """
+        HierarchicalRegionGrower = _ensure_hrg()
+
         if self.smoothed_chm is None:
             self.smooth_chm(ws=3, method="median")
 
