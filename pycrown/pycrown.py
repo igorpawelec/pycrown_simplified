@@ -220,6 +220,9 @@ class PyCrown:
         Korekta pozycji tree tops przez uśrednianie pozycji lokalnych maximów
         w obrębie jednego drzewa.
 
+        Uses scipy.spatial.cKDTree for O(n log n) neighbor queries instead
+        of O(n²) cdist.
+
         Parameters
         ----------
         distance_threshold : float, optional
@@ -231,8 +234,6 @@ class PyCrown:
         corrected_tops : ndarray, shape (m, 2)
             Skorygowane pozycje tree tops, gdzie m ≤ n.
         """
-        _, cdist = _ensure_scipy()
-
         tree_tops = self.tree_tops
         if not isinstance(tree_tops, np.ndarray):
             tree_tops = np.array(tree_tops)
@@ -240,36 +241,42 @@ class PyCrown:
         if tree_tops.shape[0] < 2:
             return tree_tops
 
-        groups = []
-        used = np.zeros(tree_tops.shape[0], dtype=bool)
-        for i in range(tree_tops.shape[0]):
-            if used[i]:
-                continue
-            group = [i]
-            used[i] = True
-            expanded = True
-            while expanded:
-                expanded = False
-                current_indices = np.array(group)
-                current_points = tree_tops[current_indices]
-                remaining_indices = np.where(~used)[0]
-                if remaining_indices.size == 0:
-                    break
-                remaining_points = tree_tops[remaining_indices]
-                dists = cdist(remaining_points, current_points)
-                close_points = remaining_indices[np.any(dists < distance_threshold, axis=1)]
-                if close_points.size > 0:
-                    for idx in close_points:
-                        group.append(idx)
-                        used[idx] = True
-                    expanded = True
-            groups.append(group)
+        # KDTree approach: query_ball_point gives all neighbors within radius
+        from scipy.spatial import cKDTree
+        kd = cKDTree(tree_tops)
+        neighbor_lists = kd.query_ball_point(tree_tops, r=distance_threshold)
+
+        # Union-Find for fast grouping
+        n = tree_tops.shape[0]
+        parent = np.arange(n)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]  # path compression
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for i, neighbors in enumerate(neighbor_lists):
+            for j in neighbors:
+                if j > i:
+                    union(i, j)
+
+        # Group by root and average
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for i in range(n):
+            groups[find(i)].append(i)
 
         corrected_list = []
-        for group in groups:
-            pts = tree_tops[group]
-            mean_pt = np.mean(pts, axis=0)
-            corrected_list.append(mean_pt)
+        for indices in groups.values():
+            pts = tree_tops[indices]
+            corrected_list.append(np.mean(pts, axis=0))
+
         corrected_tops = np.array(corrected_list)
         self.tree_tops = corrected_tops
         return corrected_tops
