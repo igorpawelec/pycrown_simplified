@@ -536,13 +536,18 @@ class HierarchicalRegionGrower:
                 sid, members = _grow_worker(args)
                 results[sid] = members
 
-        # 6) Convert member sets → binary masks
+        # 6) Convert member sets → label raster directly (no mask list)
+        # Build a lookup: watershed_label → crown_id
         labels = self.watershed_labels
-        masks = []
-        for sid in seed_ids:
+        max_wlabel = int(labels.max()) + 1
+        ws_to_crown = np.zeros(max_wlabel, dtype=np.int32)
+        for crown_id, sid in enumerate(seed_ids, start=1):
             member_set = results[sid]
-            member_arr = np.array(list(member_set), dtype=np.int32)
-            crown_mask = np.isin(labels, member_arr)
-            masks.append(crown_mask)
+            for ws_label in member_set:
+                if 0 <= ws_label < max_wlabel:
+                    ws_to_crown[ws_label] = crown_id
 
-        return masks
+        # Single vectorized pass: remap watershed labels → crown IDs
+        crown_raster = ws_to_crown[labels]
+
+        return crown_raster

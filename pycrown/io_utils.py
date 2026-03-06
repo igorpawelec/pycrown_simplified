@@ -117,10 +117,12 @@ def save_segments(segments: np.ndarray,
     max_id = int(seg_data.max()) + 1 if seg_data.max() > 0 else 1
     pixel_counts = np.bincount(seg_data.ravel(), minlength=max_id)
 
-    # Max height per crown — use np.maximum.at
-    max_heights = np.full(max_id, -np.inf, dtype=np.float64)
+    # Max height per crown — use np.maximum.at (in-place, no copy)
+    max_heights = np.full(max_id, -np.inf, dtype=np.float32)
     flat_seg = seg_data.ravel()
-    flat_chm = chm_array.ravel().astype(np.float64)
+    flat_chm = chm_array.ravel()
+    if flat_chm.dtype != np.float32:
+        flat_chm = flat_chm.astype(np.float32)
     np.maximum.at(max_heights, flat_seg, flat_chm)
     max_heights[0] = 0.0  # background
 
