@@ -7,7 +7,7 @@ name = "pycrown-simplified"
 version = "0.1.0"
 description = "Individual tree crown segmentation from CHM"
 readme = "README.md"
-license = { file = "LICENSE.md" }
+license = { file = "LICENSE" }
 authors = [{ name = "Igor Pawelec", email = "igor.pawelec@student.urk.edu.pl" }]
 requires-python = ">=3.12"
 dependencies = [
