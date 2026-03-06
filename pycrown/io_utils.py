@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PyCrown Simplified – Simplified tree crown segmentation using CHM.
+PyCrown Simplified – I/O utilities for crown segments and tree tops.
+
+Vectorization uses only rasterio.features.shapes + fiona.
+No geopandas or shapely required.
 
 Copyright (C) 2025 Igor Pawelec
-
-This file is part of PyCrown Simplified.
-
-PyCrown Simplified is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-PyCrown Simplified is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details:
-<https://www.gnu.org/licenses/>.
+Licence: GPLv3
 """
 
 __author__    = "Igor Pawelec"
@@ -35,9 +26,8 @@ def _ensure_fiona():
         return fiona
     except ImportError as e:
         raise ImportError(
-            "fiona is required for vector I/O (GeoPackage export).\n"
-            "Install with:  conda install -c conda-forge fiona\n"
-            "Or:            pip install fiona"
+            "fiona is required for vector I/O.\n"
+            "Install with:  conda install -c conda-forge fiona"
         ) from e
     except OSError as e:
         raise OSError(
@@ -59,9 +49,11 @@ def _ensure_rasterio_features():
 
 
 def _ensure_morphology():
-    from skimage.morphology import binary_closing, disk
-    return binary_closing, disk
+    from skimage.morphology import closing, disk
+    return closing, disk
 
+
+# ── Public API ────────────────────────────────────────────────────────
 
 def save_segments(segments: np.ndarray,
                   out_path: str,
@@ -69,14 +61,34 @@ def save_segments(segments: np.ndarray,
                   transform,
                   crs_wkt: str,
                   chm_array: np.ndarray,
-                  closing_radius: int = 0) -> None:
+                  closing_radius: int = 0,
+                  driver: str = "ESRI Shapefile") -> None:
     """
-    Zapis segmentów koron:
-     - RAW (.bin + .vrt)
-     - GeoPackage z poligonami i atrybutami:
-         id, max_height, area_m2, crown_diameter
-    Jeśli closing_radius>0, na każdy segment nakładamy binary_closing
-    z elementem strukturalnym disk(closing_radius), żeby wygładzić krawędzie.
+    Save crown segments as vector file + raw raster dump.
+
+    Outputs
+    -------
+    - RAW raster: {fname}.bin + {fname}.vrt
+    - Vector file with attributes: id, max_height, area_m2, crown_diameter
+
+    Parameters
+    ----------
+    segments : ndarray (int32)
+        Crown label raster. 0 = background.
+    out_path : str
+        Output directory.
+    fname : str
+        Base filename (without extension).
+    transform : affine.Affine
+        Geotransform of the raster.
+    crs_wkt : str
+        CRS as WKT string.
+    chm_array : ndarray
+        Original CHM (for max_height attribute).
+    closing_radius : int
+        Morphological closing radius (0 = off).
+    driver : str
+        Fiona driver: "ESRI Shapefile" (default), "GPKG", "GeoJSON".
     """
     fiona = _ensure_fiona()
     shapes = _ensure_rasterio_features()
@@ -101,8 +113,11 @@ def save_segments(segments: np.ndarray,
         f.write('  </VRTRasterBand>\n')
         f.write('</VRTDataset>\n')
 
-    # --- 2) Wektorowanie + atrybuty ---
-    gpkg_path = os.path.join(out_path, f"{fname}.gpkg")
+    # --- 2) Vector output ---
+    ext_map = {"ESRI Shapefile": ".shp", "GPKG": ".gpkg", "GeoJSON": ".geojson"}
+    ext = ext_map.get(driver, ".shp")
+    vec_path = os.path.join(out_path, f"{fname}{ext}")
+
     schema = {
         'geometry': 'Polygon',
         'properties': {
@@ -118,12 +133,12 @@ def save_segments(segments: np.ndarray,
 
     # Lazy morphology — only if needed
     if closing_radius > 0:
-        binary_closing, disk = _ensure_morphology()
+        morph_closing, disk = _ensure_morphology()
 
     with fiona.open(
-        gpkg_path,
+        vec_path,
         'w',
-        driver='GPKG',
+        driver=driver,
         crs_wkt=crs_wkt,
         schema=schema
     ) as dst:
@@ -131,7 +146,7 @@ def save_segments(segments: np.ndarray,
             seg_mask = (segments == seg_id)
 
             if closing_radius > 0:
-                seg_mask = binary_closing(seg_mask, disk(closing_radius))
+                seg_mask = morph_closing(seg_mask, disk(closing_radius))
 
             arr = np.where(seg_mask, seg_id, 0).astype(np.int32)
 
@@ -144,7 +159,7 @@ def save_segments(segments: np.ndarray,
                 diam  = float(2 * np.sqrt(area / np.pi))
 
                 props = {
-                    'id': seg_id,
+                    'id': int(seg_id),
                     'max_height': round(max_h, 2),
                     'area_m2':    round(area,   2),
                     'crown_diameter': round(diam, 2)
@@ -161,13 +176,34 @@ def save_tree_tops(corrected_tops: np.ndarray,
                    fname: str,
                    transform,
                    crs_wkt: str,
-                   chm: np.ndarray) -> None:
+                   chm: np.ndarray,
+                   driver: str = "ESRI Shapefile") -> None:
     """
-    Zapis skorygowanych tree-tops do GeoPackage z kolumnami: id, height.
+    Save corrected tree tops as point vector file.
+
+    Parameters
+    ----------
+    corrected_tops : ndarray (n, 2)
+        Tree top positions as (row, col) pixel coordinates.
+    out_path : str
+        Output directory.
+    fname : str
+        Base filename (without extension).
+    transform : affine.Affine
+        Geotransform.
+    crs_wkt : str
+        CRS as WKT string.
+    chm : ndarray
+        CHM raster (for height attribute).
+    driver : str
+        Fiona driver: "ESRI Shapefile" (default), "GPKG", "GeoJSON".
     """
     fiona = _ensure_fiona()
 
-    gpkg_path = os.path.join(out_path, fname + "_treetops.gpkg")
+    ext_map = {"ESRI Shapefile": ".shp", "GPKG": ".gpkg", "GeoJSON": ".geojson"}
+    ext = ext_map.get(driver, ".shp")
+    vec_path = os.path.join(out_path, fname + f"_treetops{ext}")
+
     schema = {
         'geometry': 'Point',
         'properties': {
@@ -177,16 +213,15 @@ def save_tree_tops(corrected_tops: np.ndarray,
     }
 
     coords = np.array(corrected_tops, dtype=float)
-
     rows = coords[:, 0].astype(int)
     cols = coords[:, 1].astype(int)
     heights = chm[rows, cols]
     heights = np.round(heights, 2)
 
     with fiona.open(
-        gpkg_path,
+        vec_path,
         'w',
-        driver='GPKG',
+        driver=driver,
         crs_wkt=crs_wkt,
         schema=schema
     ) as dst:

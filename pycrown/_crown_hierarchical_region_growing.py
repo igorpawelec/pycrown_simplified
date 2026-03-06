@@ -39,7 +39,7 @@ from numba.typed import List as NumbaList
 import heapq
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from skimage.segmentation import watershed
-from skimage.morphology import binary_opening, binary_closing, disk
+from skimage.morphology import opening, closing, disk
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -389,9 +389,9 @@ class HierarchicalRegionGrower:
         mask = self.chm > mask_thresh
         if morpho_radius > 0:
             selem = disk(morpho_radius)
-            mask = binary_opening(mask, selem)
+            mask = opening(mask, selem)
             # Close small holes that opening may create inside crowns
-            mask = binary_closing(mask, selem)
+            mask = closing(mask, selem)
         return mask
 
     # ── WATERSHED ─────────────────────────────────────────────────────

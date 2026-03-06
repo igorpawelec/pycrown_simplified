@@ -64,9 +64,11 @@ def _crown_dalponte(Chm, Trees, th_seed, th_crown, th_tree, max_crown):
                     seed_h = Chm[seed_y, seed_x]
                     mh_crown = sum_height[tidx] / npixel[tidx]
                     
-                    # Define coordinates for 4-connected neighbours
-                    # (up, left, right, down)
-                    if Crowns[row - 1, col] == 0:
+                    # 4-connected neighbours: up, left, right, down
+                    # FIX: check CrownsTemp (not Crowns) to prevent
+                    # multiple crowns claiming the same pixel in one pass.
+                    # This matches the original Zörner implementation.
+                    if CrownsTemp[row - 1, col] == 0:
                         nb_h = Chm[row - 1, col]
                         if (nb_h > th_tree and 
                             nb_h > (seed_h * th_seed) and 
@@ -78,7 +80,7 @@ def _crown_dalponte(Chm, Trees, th_seed, th_crown, th_tree, max_crown):
                             npixel[tidx] += 1
                             sum_height[tidx] += nb_h
                             grown = True
-                    if Crowns[row, col - 1] == 0:
+                    if CrownsTemp[row, col - 1] == 0:
                         nb_h = Chm[row, col - 1]
                         if (nb_h > th_tree and 
                             nb_h > (seed_h * th_seed) and 
@@ -90,7 +92,7 @@ def _crown_dalponte(Chm, Trees, th_seed, th_crown, th_tree, max_crown):
                             npixel[tidx] += 1
                             sum_height[tidx] += nb_h
                             grown = True
-                    if Crowns[row, col + 1] == 0:
+                    if CrownsTemp[row, col + 1] == 0:
                         nb_h = Chm[row, col + 1]
                         if (nb_h > th_tree and 
                             nb_h > (seed_h * th_seed) and 
@@ -102,7 +104,7 @@ def _crown_dalponte(Chm, Trees, th_seed, th_crown, th_tree, max_crown):
                             npixel[tidx] += 1
                             sum_height[tidx] += nb_h
                             grown = True
-                    if Crowns[row + 1, col] == 0:
+                    if CrownsTemp[row + 1, col] == 0:
                         nb_h = Chm[row + 1, col]
                         if (nb_h > th_tree and 
                             nb_h > (seed_h * th_seed) and 
