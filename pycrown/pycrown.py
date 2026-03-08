@@ -111,7 +111,8 @@ def _ensure_hrg():
 # ── Main class ────────────────────────────────────────────────────────
 
 class PyCrown:
-    def __init__(self, chm_file=None, chm_array=None, transform=None, crs=None):
+    def __init__(self, chm_file=None, chm_array=None, transform=None, crs=None,
+                 window=None):
         """
         Inicjalizuje obiekt PyCrown.
 
@@ -130,6 +131,9 @@ class PyCrown:
             eksportować wyniki).
         crs : rasterio.crs.CRS or str, optional
             Układ współrzędnych.
+        window : tuple or rasterio.windows.Window, optional
+            Okno do wczytania fragmentu CHM: (col_off, row_off, width, height).
+            Przydatne dla dużych rastrów — wczytuje tylko wybrany region.
         """
         if chm_file is not None and chm_array is not None:
             raise ValueError("Podaj albo chm_file albo chm_array, nie oba.")
@@ -139,8 +143,15 @@ class PyCrown:
         if chm_file is not None:
             rasterio = _ensure_rasterio()
             with rasterio.open(chm_file) as src:
-                self.chm = src.read(1)
-                self.transform = src.transform
+                if window is not None:
+                    from rasterio.windows import Window as RioWindow
+                    if isinstance(window, (list, tuple)) and len(window) == 4:
+                        window = RioWindow(*window)
+                    self.chm = src.read(1, window=window)
+                    self.transform = src.window_transform(window)
+                else:
+                    self.chm = src.read(1)
+                    self.transform = src.transform
                 self.crs = src.crs
         elif chm_array is not None:
             self.chm = np.asarray(chm_array)

@@ -225,3 +225,53 @@ def save_tree_tops(corrected_tops: np.ndarray,
                     'height': float(heights[idx])
                 }
             })
+
+
+def save_crowns_raster(crowns: np.ndarray,
+                       output_path: str,
+                       transform,
+                       crs_wkt: str,
+                       nodata: int = 0,
+                       compress: str = "deflate") -> None:
+    """
+    Save crown label raster as GeoTIFF.
+
+    Parameters
+    ----------
+    crowns : ndarray (int32)
+        Crown label raster. 0 = background.
+    output_path : str
+        Output GeoTIFF path.
+    transform : affine.Affine
+        Geotransform.
+    crs_wkt : str
+        CRS as WKT string.
+    nodata : int
+        NoData value. Default 0.
+    compress : str
+        Compression: "deflate", "lzw", "zstd", "none". Default "deflate".
+    """
+    try:
+        import rasterio
+        from rasterio.crs import CRS
+    except ImportError as e:
+        raise ImportError(
+            "rasterio required. Install: conda install -c conda-forge rasterio"
+        ) from e
+
+    rows, cols = crowns.shape
+    profile = {
+        'driver': 'GTiff',
+        'dtype': 'int32',
+        'width': cols,
+        'height': rows,
+        'count': 1,
+        'crs': CRS.from_wkt(crs_wkt) if isinstance(crs_wkt, str) else crs_wkt,
+        'transform': transform,
+        'nodata': nodata,
+    }
+    if compress and compress.lower() != "none":
+        profile['compress'] = compress
+
+    with rasterio.open(output_path, 'w', **profile) as dst:
+        dst.write(crowns.astype(np.int32), 1)

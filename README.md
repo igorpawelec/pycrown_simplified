@@ -120,11 +120,19 @@ chm = np.random.uniform(0, 30, (500, 500)).astype(np.float32)
 pc = PyCrown(chm_array=chm)
 ```
 
+### Windowed read (large rasters)
+
+```python
+# Load only a 2000×2000 px region starting at col=1000, row=500
+pc = PyCrown("large_chm.tif", window=(1000, 500, 2000, 2000))
+```
+
 ## API
 
 | Method | Description |
 |---|---|
 | `PyCrown(chm_file)` or `PyCrown(chm_array=...)` | Initialize from file or array |
+| `PyCrown(..., window=(col, row, w, h))` | Windowed read for large rasters |
 | `smooth_chm(ws, method)` | Smooth CHM |
 | `tree_detection(hmin, ws)` | Detect tree tops |
 | `correct_tree_tops(distance_threshold)` | Merge nearby tops (KDTree) |
@@ -133,8 +141,16 @@ pc = PyCrown(chm_array=chm)
 | `hierarchical_crown_delineation(...)` | HRG v2 |
 | `save_segments(...)` | Export crowns to SHP/GPKG |
 | `save_tree_tops(...)` | Export tree tops to SHP/GPKG |
+| `save_crowns_raster(...)` | Export crowns as GeoTIFF |
 
 See the docstrings for full parameter details.
+
+## Testing
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
 
 ## Repository structure
 
@@ -146,7 +162,8 @@ pycrown_simplified/
 │   ├── _crown_dalponte_numba.py          # Standard Dalponte (Numba)
 │   ├── _crown_dalponteCIRC_numba.py      # Circular Dalponte (Numba)
 │   ├── _crown_hierarchical_region_growing.py  # HRG v2
-│   └── io_utils.py                       # Vector I/O (fiona + rasterio)
+│   └── io_utils.py                       # I/O: vector (fiona) + raster (rasterio)
+├── tests/                                # Pytest suite
 ├── test_data/                            # Sample CHM rasters
 ├── www/                                  # Logo & assets
 ├── pycrown_test.py                       # Example usage script
@@ -155,7 +172,7 @@ pycrown_simplified/
 ├── CITATION.cff
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
-└── LICENSE.md
+└── LICENSE
 ```
 
 ## Requirements
