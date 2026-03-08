@@ -133,6 +133,7 @@ pc = PyCrown("large_chm.tif", window=(1000, 500, 2000, 2000))
 |---|---|
 | `PyCrown(chm_file)` or `PyCrown(chm_array=...)` | Initialize from file or array |
 | `PyCrown(..., window=(col, row, w, h))` | Windowed read for large rasters |
+| `PyCrown(..., quiet=True)` | Suppress progress messages |
 | `smooth_chm(ws, method)` | Smooth CHM |
 | `tree_detection(hmin, ws)` | Detect tree tops |
 | `correct_tree_tops(distance_threshold)` | Merge nearby tops (KDTree) |

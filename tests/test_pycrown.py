@@ -133,3 +133,12 @@ class TestImports:
         assert callable(save_segments)
         assert callable(save_tree_tops)
         assert callable(save_crowns_raster)
+
+    def test_quiet_mode(self):
+        chm = np.random.uniform(0, 30, (50, 50)).astype(np.float32)
+        from affine import Affine
+        pc = PyCrown(chm_array=chm, transform=Affine.identity(), quiet=True)
+        pc.smooth_chm(ws=3)
+        pc.tree_detection(hmin=5, ws=3)
+        # Should run without printing anything
+        assert pc.tree_tops is not None
