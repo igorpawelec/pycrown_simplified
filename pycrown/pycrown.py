@@ -112,7 +112,7 @@ def _ensure_hrg():
 
 class PyCrown:
     def __init__(self, chm_file=None, chm_array=None, transform=None, crs=None,
-                 window=None):
+                 window=None, quiet=False):
         """
         Inicjalizuje obiekt PyCrown.
 
@@ -134,7 +134,11 @@ class PyCrown:
         window : tuple or rasterio.windows.Window, optional
             Okno do wczytania fragmentu CHM: (col_off, row_off, width, height).
             Przydatne dla dużych rastrów — wczytuje tylko wybrany region.
+        quiet : bool, default False
+            Suppress progress messages.
         """
+        self.quiet = quiet
+
         if chm_file is not None and chm_array is not None:
             raise ValueError("Podaj albo chm_file albo chm_array, nie oba.")
 
@@ -153,10 +157,15 @@ class PyCrown:
                     self.chm = src.read(1)
                     self.transform = src.transform
                 self.crs = src.crs
+            if not self.quiet:
+                print(f"PyCrown: loaded {self.chm.shape[0]}×{self.chm.shape[1]}, "
+                      f"range {np.nanmin(self.chm):.1f}–{np.nanmax(self.chm):.1f} m")
         elif chm_array is not None:
             self.chm = np.asarray(chm_array)
             self.transform = transform
             self.crs = crs
+            if not self.quiet:
+                print(f"PyCrown: array {self.chm.shape[0]}×{self.chm.shape[1]}")
         else:
             raise ValueError("Musisz podać chm_file lub chm_array.")
 
@@ -197,6 +206,10 @@ class PyCrown:
         else:
             raise ValueError(f"Nieznana metoda wygładzania: {method}")
 
+        if not self.quiet:
+            print(f"  Smooth: {method} ws={ws}, "
+                  f"range {np.nanmin(self.smoothed_chm):.1f}–{np.nanmax(self.smoothed_chm):.1f} m")
+
         return self.smoothed_chm
 
     def tree_detection(self, hmin=2, ws=3):
@@ -224,6 +237,8 @@ class PyCrown:
         labels, num = ndimage.label(detected)
         centers = ndimage.center_of_mass(self.smoothed_chm, labels, range(1, num + 1))
         self.tree_tops = centers
+        if not self.quiet:
+            print(f"  Tree detection: {len(centers)} tops (hmin={hmin}, ws={ws})")
         return centers
 
     def correct_tree_tops(self, distance_threshold=5.0):
@@ -290,6 +305,9 @@ class PyCrown:
 
         corrected_tops = np.array(corrected_list)
         self.tree_tops = corrected_tops
+        if not self.quiet:
+            print(f"  Correct tops: {len(tree_tops)} → {len(corrected_tops)} "
+                  f"(dist_thr={distance_threshold})")
         return corrected_tops
 
     def crown_delineation(self, mode="standard", th_seed=0.7, th_crown=0.55,
@@ -326,6 +344,9 @@ class PyCrown:
                            np.floor(arr[:, 1]))).astype(np.int32)
         chm = self.smoothed_chm.astype(np.float32)
 
+        import time as _time
+        _t0 = _time.time()
+
         if mode == "standard":
             _crown_dalponte = _ensure_dalponte()
             self.crowns = _crown_dalponte(
@@ -338,6 +359,11 @@ class PyCrown:
                 float(th_tree), float(max_crown))
         else:
             raise ValueError("Mode must be 'standard' or 'circ'")
+
+        if not self.quiet:
+            n_crowns = len(np.unique(self.crowns)) - 1
+            print(f"  Dalponte {mode}: {n_crowns} crowns in {_time.time()-_t0:.2f}s")
+
         return self.crowns
 
     def screen_small_trees(self, hmin: float = 2.0):
@@ -355,11 +381,15 @@ class PyCrown:
             (tree_tops, crowns)
         """
         kept = []
+        before_count = len(self.tree_tops)
         for pt in self.tree_tops:
             r, c = int(pt[0]), int(pt[1])
             if self.smoothed_chm[r, c] >= hmin:
                 kept.append(pt)
         self.tree_tops = np.array(kept)
+
+        if not self.quiet:
+            print(f"  Screen: {before_count} → {len(kept)} (≥{hmin}m)")
 
         if self.crowns is not None:
             new_label = 1
@@ -426,6 +456,12 @@ class PyCrown:
 
         seeds = [(int(r), int(c)) for r, c in self.tree_tops]
 
+        if not self.quiet:
+            print(f"  HRG v2: {len(seeds)} seeds, starting...")
+
+        import time as _time
+        _t0 = _time.time()
+
         self._hrg = HierarchicalRegionGrower(
             chm_path=self.chm_file,
             smoothing=lambda arr: self.smoothed_chm
@@ -444,4 +480,9 @@ class PyCrown:
         )
 
         self.crowns = crown_raster.astype(np.int32)
+
+        if not self.quiet:
+            n_crowns = len(np.unique(self.crowns)) - 1
+            print(f"  HRG v2: {n_crowns} crowns in {_time.time()-_t0:.2f}s")
+
         return self.crowns
