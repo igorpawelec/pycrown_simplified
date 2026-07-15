@@ -225,8 +225,10 @@ class PyCrown:
 
         Returns
         -------
-        list of tuples
-            Lista współrzędnych (wiersz, kolumna) wykrytych tree tops.
+        tree_tops : ndarray, shape (n, 2), dtype float64
+            Subpixel (row, column) coordinates of the detected tree tops.
+            Empty detections give shape (0, 2), not (0,), so that callers
+            can index ``[:, 0]`` unconditionally.
         """
         ndimage, _ = _ensure_scipy()
 
@@ -235,7 +237,11 @@ class PyCrown:
         local_max = ndimage.maximum_filter(self.smoothed_chm, size=ws)
         detected = (self.smoothed_chm == local_max) & (self.smoothed_chm > hmin)
         labels, num = ndimage.label(detected)
-        centers = ndimage.center_of_mass(self.smoothed_chm, labels, range(1, num + 1))
+        centers = ndimage.center_of_mass(self.smoothed_chm, labels,
+                                         range(1, num + 1))
+        # center_of_mass yields a list of tuples, and an empty list when
+        # nothing was detected. reshape(-1, 2) normalises both to (n, 2).
+        centers = np.asarray(centers, dtype=np.float64).reshape(-1, 2)
         self.tree_tops = centers
         if not self.quiet:
             print(f"  Tree detection: {len(centers)} tops (hmin={hmin}, ws={ws})")
@@ -260,11 +266,17 @@ class PyCrown:
         corrected_tops : ndarray, shape (m, 2)
             Skorygowane pozycje tree tops, gdzie m ≤ n.
         """
-        tree_tops = self.tree_tops
-        if not isinstance(tree_tops, np.ndarray):
-            tree_tops = np.array(tree_tops)
+        # tree_detection already normalises to (n, 2); accept a plain list
+        # too, in case tree_tops was assigned by hand.
+        tree_tops = np.asarray(self.tree_tops, dtype=np.float64).reshape(-1, 2)
 
         if tree_tops.shape[0] < 2:
+            # Nothing to merge. Still store the normalised array so that
+            # self.tree_tops has the same type on every path.
+            self.tree_tops = tree_tops
+            if not self.quiet:
+                print(f"  Correct tops: {len(tree_tops)} → {len(tree_tops)} "
+                      f"(dist_thr={distance_threshold})")
             return tree_tops
 
         # KDTree approach: query_ball_point gives all neighbors within radius
@@ -303,7 +315,8 @@ class PyCrown:
             pts = tree_tops[indices]
             corrected_list.append(np.mean(pts, axis=0))
 
-        corrected_tops = np.array(corrected_list)
+        corrected_tops = np.asarray(corrected_list,
+                                    dtype=np.float64).reshape(-1, 2)
         self.tree_tops = corrected_tops
         if not self.quiet:
             print(f"  Correct tops: {len(tree_tops)} → {len(corrected_tops)} "
@@ -339,7 +352,7 @@ class PyCrown:
         if self.tree_tops is None:
             self.tree_tops = self.tree_detection()
 
-        arr = np.array(self.tree_tops)
+        arr = self.tree_tops
         Trees = np.vstack((np.floor(arr[:, 0]),
                            np.floor(arr[:, 1]))).astype(np.int32)
         chm = self.smoothed_chm.astype(np.float32)
@@ -386,7 +399,7 @@ class PyCrown:
             r, c = int(pt[0]), int(pt[1])
             if self.smoothed_chm[r, c] >= hmin:
                 kept.append(pt)
-        self.tree_tops = np.array(kept)
+        self.tree_tops = np.asarray(kept, dtype=np.float64).reshape(-1, 2)
 
         if not self.quiet:
             print(f"  Screen: {before_count} → {len(kept)} (≥{hmin}m)")
