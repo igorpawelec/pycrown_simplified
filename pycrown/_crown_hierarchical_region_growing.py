@@ -37,7 +37,7 @@ import rasterio
 from numba import njit
 from numba.typed import List as NumbaList
 import heapq
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from skimage.segmentation import watershed
 from skimage.morphology import opening, closing, disk
 
@@ -208,9 +208,9 @@ def _edges_to_csr_and_weights(edge_a_list, edge_b_list, num_regions,
 # ═══════════════════════════════════════════════════════════════════════
 
 def _hierarchical_grow_single(seed_id, row_ptr, col_idx, weights,
-                               reg_n, reg_mean, reg_var,
-                               var_threshold, max_iters=200,
-                               anneal_lambda=1.0):
+                              reg_n, reg_mean, reg_var,
+                              var_threshold, max_iters=200,
+                              anneal_lambda=1.0, retry_rejected=False):
     """
     Grow a single seed region using:
       - Welford online stats (improvement #1)
@@ -231,6 +231,26 @@ def _hierarchical_grow_single(seed_id, row_ptr, col_idx, weights,
     anneal_lambda : float
         Annealing factor. 1.0 = no annealing (constant threshold).
         < 1.0 (e.g. 0.95) = threshold tightens each iteration.
+    retry_rejected : bool
+        Whether a candidate rejected once may be reconsidered if it is
+        reached again from another accepted region.
+
+        Rejection is not permanent in principle: merging a large,
+        homogeneous neighbour can *lower* the region's variance, which
+        can bring a previously rejected candidate back under the
+        threshold. Blocking rejected candidates (the default) is
+        therefore an approximation — it trades that recall for speed and
+        keeps each candidate to a single test.
+
+        True searches more thoroughly at the cost of extra merge tests.
+        The effect is confined to intermediate variance thresholds, where
+        crowns actively merge: on a 1105-tree synthetic scene it changed
+        nothing at var_threshold 2 or 8 (rejections are final anyway) and
+        nothing at 120 (everything merges regardless), but changed ~17%
+        of the raster at 20. The direction is not predictable — the crown
+        count moved both up and down — because absorbing more regions
+        also shifts which crown wins each contested region.
+        Default False.
 
     Returns
     -------
@@ -255,7 +275,10 @@ def _hierarchical_grow_single(seed_id, row_ptr, col_idx, weights,
         w  = weights[idx]
         heapq.heappush(heap, (w, int(nb)))
 
-    visited_candidates = set()  # avoid re-processing
+    # Candidates already tested and rejected. Kept out of the search
+    # unless retry_rejected is set — see the docstring for why this is
+    # an approximation.
+    rejected = set()
 
     for iteration in range(max_iters):
         if not heap:
@@ -266,15 +289,17 @@ def _hierarchical_grow_single(seed_id, row_ptr, col_idx, weights,
             v_thresh *= anneal_lambda
 
         # Pop best candidate from heap (improvement #2)
+        cand = -1
         while heap:
-            w_cand, cand = heapq.heappop(heap)
-            if cand not in members and cand not in visited_candidates:
-                break
-        else:
-            break  # heap exhausted
-
-        if cand in members:
+            _, c = heapq.heappop(heap)
+            if c in members:
+                continue
+            if c in rejected and not retry_rejected:
+                continue
+            cand = c
             break
+        if cand < 0:
+            break  # heap exhausted
 
         # Test merge with Welford (improvement #1) — O(1) scalar ops
         test_n, test_mean, test_var = _merge_stats(
@@ -285,6 +310,7 @@ def _hierarchical_grow_single(seed_id, row_ptr, col_idx, weights,
         if test_var <= v_thresh:
             # Accept candidate
             members.add(cand)
+            rejected.discard(cand)
             cur_n, cur_mean, cur_var = test_n, test_mean, test_var
 
             # Add candidate's neighbors to heap
@@ -295,8 +321,7 @@ def _hierarchical_grow_single(seed_id, row_ptr, col_idx, weights,
                 if nb not in members:
                     heapq.heappush(heap, (weights[idx], int(nb)))
         else:
-            # Reject — mark as visited so we don't retry
-            visited_candidates.add(cand)
+            rejected.add(cand)
 
     return members
 
@@ -305,21 +330,29 @@ def _hierarchical_grow_single(seed_id, row_ptr, col_idx, weights,
 # 3. PARALLEL GROW WRAPPER
 # ═══════════════════════════════════════════════════════════════════════
 
-def _grow_worker(args):
-    """
-    Worker function for parallel execution.
-    Unpacks args tuple for ProcessPoolExecutor compatibility.
-    """
-    (seed_id, row_ptr, col_idx, weights,
-     reg_n, reg_mean, reg_var,
-     var_threshold, max_iters, anneal_lambda) = args
+# The CSR graph and per-region stats are identical for every seed and are
+# never written to during growing. Passing them inside each task would
+# re-pickle the whole graph once per seed — for a few thousand trees that
+# is hundreds of MB of IPC and makes n_jobs>1 slower than sequential.
+# Instead each worker process receives them once, via the pool
+# initializer, and tasks carry only seed ids.
+_WORKER_CTX = {}
 
-    members = _hierarchical_grow_single(
-        seed_id, row_ptr, col_idx, weights,
-        reg_n, reg_mean, reg_var,
-        var_threshold, max_iters, anneal_lambda
-    )
-    return seed_id, members
+
+def _init_worker(row_ptr, col_idx, weights, reg_n, reg_mean, reg_var,
+                 var_threshold, max_iters, anneal_lambda, retry_rejected):
+    """Pool initializer: stash the read-only grow context in this worker."""
+    _WORKER_CTX["args"] = (row_ptr, col_idx, weights,
+                           reg_n, reg_mean, reg_var,
+                           var_threshold, max_iters, anneal_lambda,
+                           retry_rejected)
+
+
+def _grow_chunk(seed_chunk):
+    """Grow a batch of seeds using the context stored by _init_worker."""
+    args = _WORKER_CTX["args"]
+    return [(int(sid), _hierarchical_grow_single(int(sid), *args))
+            for sid in seed_chunk]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -593,6 +626,7 @@ class HierarchicalRegionGrower:
                 max_iters: int = 200,
                 conflict_rule: str = "height",
                 protect_seeds: bool = False,
+                retry_rejected: bool = False,
                 n_jobs: int = 1) -> np.ndarray:
         """
         Full pipeline: watershed → weighted RAG → Welford grows → arbitration.
@@ -635,9 +669,16 @@ class HierarchicalRegionGrower:
             its own region and yields its own crown. Use when the tree
             tops are trusted (e.g. field-measured) and merging is not
             wanted. Default False.
+        retry_rejected : bool
+            Allow a rejected region to be reconsidered if reached again
+            from another accepted region. Default False, which is faster
+            but is an approximation — see
+            :func:`_hierarchical_grow_single`.
         n_jobs : int
-            Number of parallel processes. 1 = sequential.
-            -1 = use all available cores.
+            Number of parallel processes. 1 = sequential. -1 = all cores.
+            The grow is cheap per seed, so this pays off only for large
+            scenes; the context is shared per worker rather than per
+            task, but process start-up still costs ~0.1 s each.
 
         Returns
         -------
@@ -681,27 +722,32 @@ class HierarchicalRegionGrower:
             import os
             n_jobs = os.cpu_count() or 1
 
-        # Prepare args for each seed
+        # Read-only context shared by every seed.
         common_args = (self.row_ptr, self.col_idx, self.weights,
                        self.reg_n, self.reg_mean, self.reg_var,
-                       variance_thresh, max_iters, anneal_lambda)
-
-        all_args = [(sid, *common_args) for sid in seed_ids]
+                       variance_thresh, max_iters, anneal_lambda,
+                       retry_rejected)
 
         results = {}
         if n_jobs > 1 and n_seeds > 1:
-            # Parallel execution (improvement #3)
-            with ProcessPoolExecutor(max_workers=min(n_jobs, n_seeds)) as executor:
-                futures = {executor.submit(_grow_worker, args): args[0]
-                           for args in all_args}
-                for future in as_completed(futures):
-                    sid, members = future.result()
-                    results[sid] = members
+            n_workers = min(n_jobs, n_seeds)
+            # Several chunks per worker: enough to even out uneven grow
+            # times, few enough to keep task overhead negligible.
+            n_chunks = min(n_workers * 4, n_seeds)
+            chunks = [c for c in np.array_split(np.array(seed_ids), n_chunks)
+                      if len(c)]
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                initializer=_init_worker,
+                initargs=common_args,
+            ) as executor:
+                for chunk_result in executor.map(_grow_chunk, chunks):
+                    for sid, members in chunk_result:
+                        results[sid] = members
         else:
-            # Sequential
-            for args in all_args:
-                sid, members = _grow_worker(args)
-                results[sid] = members
+            # Sequential — call the grow directly, no worker context needed.
+            for sid in seed_ids:
+                results[sid] = _hierarchical_grow_single(sid, *common_args)
 
         # 6) Arbitrate regions claimed by more than one crown.
         # Growing is independent per seed, so overlaps are expected; without

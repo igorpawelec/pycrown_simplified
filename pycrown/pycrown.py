@@ -415,6 +415,7 @@ class PyCrown:
             max_iters: int = 200,
             conflict_rule: str = "height",
             protect_seeds: bool = False,
+            retry_rejected: bool = False,
             n_jobs: int = 1
     ) -> np.ndarray:
         """
@@ -452,8 +453,13 @@ class PyCrown:
             If True, every tree top keeps its own crown and none is
             absorbed by a neighbour. Default False, which lets the
             growing merge over-detected tree tops.
+        retry_rejected : bool
+            Reconsider regions rejected earlier in the same grow. Only
+            bites at intermediate variance_thresh, where crowns actively
+            merge; at tight thresholds it changes nothing. Default False.
         n_jobs : int
-            Parallel processes. 1 = sequential, -1 = all cores.
+            Parallel processes. 1 = sequential, -1 = all cores. Worth it
+            only for large scenes — growing is cheap per tree.
 
         Returns
         -------
@@ -491,6 +497,7 @@ class PyCrown:
             max_iters=max_iters,
             conflict_rule=conflict_rule,
             protect_seeds=protect_seeds,
+            retry_rejected=retry_rejected,
             n_jobs=n_jobs
         )
 
