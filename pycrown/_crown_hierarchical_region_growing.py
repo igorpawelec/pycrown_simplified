@@ -34,7 +34,7 @@ __license__   = "GPLv3"
 
 import numpy as np
 import rasterio
-from numba import njit, types
+from numba import njit
 from numba.typed import List as NumbaList
 import heapq
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -56,30 +56,11 @@ def _merge_stats(nA, meanA, varA, nB, meanB, varB):
     N = nA + nB
     if N == 0:
         return 0, 0.0, 0.0
-    delta = meanB - meanA
     mean_new = (nA * meanA + nB * meanB) / N
     # Combined variance (population)
     var_new = (nA * (varA + (meanA - mean_new) ** 2) +
                nB * (varB + (meanB - mean_new) ** 2)) / N
     return N, mean_new, var_new
-
-
-@njit(cache=True)
-def _remove_stats(nTotal, meanTotal, varTotal, nB, meanB, varB):
-    """
-    Remove subset B from total, returning stats of remainder A.
-    Inverse of _merge_stats.
-    """
-    nA = nTotal - nB
-    if nA <= 0:
-        return 0, 0.0, 0.0
-    meanA = (nTotal * meanTotal - nB * meanB) / nA
-    varA = (nTotal * (varTotal + (meanTotal - meanA) ** 2) -
-            nB * (varB + (meanB - meanA) ** 2)) / nA
-    # Clamp numerical noise
-    if varA < 0.0:
-        varA = 0.0
-    return nA, meanA, varA
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -97,14 +78,18 @@ def _build_adjacency_and_stats(labels, chm, num_regions):
     reg_n    : int64[num_regions+1]   — pixel count per region (index 0 unused)
     reg_mean : float64[num_regions+1] — mean CHM height
     reg_var  : float64[num_regions+1] — population variance
-    adj_set  : set of (int, int)      — adjacency pairs (a < b)
-    border_len : dict (a,b) -> int    — shared border length in pixels
+    reg_cy   : float64[num_regions+1] — centroid row coordinate
+    reg_cx   : float64[num_regions+1] — centroid column coordinate
+    edge_a   : NumbaList[int]         — edge endpoints (a < b), with duplicates
+    edge_b   : NumbaList[int]         — duplicate count = shared border length
     """
     rows, cols = labels.shape
     # --- per-region accumulators ---
-    reg_n    = np.zeros(num_regions + 1, dtype=np.int64)
-    reg_sum  = np.zeros(num_regions + 1, dtype=np.float64)
-    reg_sum2 = np.zeros(num_regions + 1, dtype=np.float64)
+    reg_n     = np.zeros(num_regions + 1, dtype=np.int64)
+    reg_sum   = np.zeros(num_regions + 1, dtype=np.float64)
+    reg_sum2  = np.zeros(num_regions + 1, dtype=np.float64)
+    reg_sumr  = np.zeros(num_regions + 1, dtype=np.float64)
+    reg_sumc  = np.zeros(num_regions + 1, dtype=np.float64)
 
     for r in range(rows):
         for c in range(cols):
@@ -115,15 +100,21 @@ def _build_adjacency_and_stats(labels, chm, num_regions):
             reg_n[lab] += 1
             reg_sum[lab] += v
             reg_sum2[lab] += v * v
+            reg_sumr[lab] += r
+            reg_sumc[lab] += c
 
     reg_mean = np.zeros(num_regions + 1, dtype=np.float64)
     reg_var  = np.zeros(num_regions + 1, dtype=np.float64)
+    reg_cy   = np.zeros(num_regions + 1, dtype=np.float64)
+    reg_cx   = np.zeros(num_regions + 1, dtype=np.float64)
     for i in range(1, num_regions + 1):
         if reg_n[i] > 0:
             reg_mean[i] = reg_sum[i] / reg_n[i]
             reg_var[i] = reg_sum2[i] / reg_n[i] - reg_mean[i] ** 2
             if reg_var[i] < 0.0:
                 reg_var[i] = 0.0
+            reg_cy[i] = reg_sumr[i] / reg_n[i]
+            reg_cx[i] = reg_sumc[i] / reg_n[i]
 
     # --- adjacency + border lengths ---
     # We'll return flat arrays and build Python structures outside numba
@@ -155,7 +146,7 @@ def _build_adjacency_and_stats(labels, chm, num_regions):
                     edge_a.append(a)
                     edge_b.append(b)
 
-    return reg_n, reg_mean, reg_var, edge_a, edge_b
+    return reg_n, reg_mean, reg_var, reg_cy, reg_cx, edge_a, edge_b
 
 
 def _edges_to_csr_and_weights(edge_a_list, edge_b_list, num_regions,
@@ -332,6 +323,130 @@ def _grow_worker(args):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# CONFLICT RESOLUTION — deterministic assignment of contested regions
+# ═══════════════════════════════════════════════════════════════════════
+
+CONFLICT_RULES = ("height", "distance", "similarity")
+
+
+def _resolve_conflicts(results, seed_ids, seed_rc, seed_height,
+                       reg_mean, reg_cy, reg_cx,
+                       rule="height", protect_seeds=False):
+    """
+    Assign each watershed region to exactly one crown.
+
+    Marker-based watershed yields one region per tree top, so the graph
+    nodes *are* the detected trees and growing merges neighbouring trees
+    into a single crown. This is how the algorithm corrects over-detected
+    tree tops, and it means two crowns routinely claim each other's
+    regions. Whichever crown loses a mutual claim is absorbed and
+    disappears from the output.
+
+    Growing runs independently per seed, so these claims must be
+    arbitrated. Doing it by write order (last writer wins) makes the
+    result depend on tree-top ordering; this function decides it on the
+    data instead:
+
+    - ``'height'``     — the taller tree wins (higher CHM at its seed
+      pixel). Dominant trees overtop their neighbours, so ambiguous
+      canopy — and any absorbed tree — is attributed to the taller crown.
+    - ``'distance'``   — the nearest seed wins (Euclidean distance from
+      region centroid to seed pixel, in pixels). Classic ITC behaviour.
+    - ``'similarity'`` — the seed whose apex height is closest to the
+      region's mean height wins, i.e. a 20 m region joins the 20 m tree
+      rather than the 30 m one. In the spirit of the variance criterion
+      that drives the growing itself. (Anchoring on the seed rather than
+      on the crown's aggregate mean is deliberate: crowns that claim the
+      same regions have the same aggregate mean by construction, which
+      would leave the rule undefined exactly when it is needed.)
+
+    Ties within a rule are broken by lower crown id, so the output is
+    fully reproducible.
+
+    Parameters
+    ----------
+    results : dict[int, set[int]]
+        seed_id → set of watershed region labels claimed by that seed.
+    seed_ids : list[int]
+        Seed ids in crown-id order (crown_id = index + 1).
+    seed_rc : list[tuple[int, int]]
+        Seed pixel (row, col), same order as *seed_ids*.
+    seed_height : ndarray[float]
+        CHM height at each seed pixel, same order as *seed_ids*.
+    reg_mean, reg_cy, reg_cx : ndarray
+        Per-region mean height and centroid, indexed by region label.
+    rule : {'height', 'distance', 'similarity'}
+        Arbitration rule for contested regions.
+    protect_seeds : bool
+        If True, the region holding a tree top always stays with that
+        tree top's crown, so no tree is ever absorbed and every input
+        tree top yields a crown. Disables merging.
+
+    Returns
+    -------
+    assignment : dict[int, int]
+        watershed region label → crown id (1-based).
+    n_contested : int
+        Number of regions claimed by more than one crown.
+    """
+    if rule not in CONFLICT_RULES:
+        raise ValueError(
+            f"rule must be one of {CONFLICT_RULES}, got {rule!r}"
+        )
+
+    from collections import defaultdict
+
+    # region label → list of crown ids claiming it
+    claims = defaultdict(list)
+    for crown_id, sid in enumerate(seed_ids, start=1):
+        for ws_label in results[sid]:
+            claims[ws_label].append(crown_id)
+
+    # Region holding the seed of each crown.
+    owner_of_region = {sid: crown_id
+                       for crown_id, sid in enumerate(seed_ids, start=1)}
+
+    assignment = {}
+    n_contested = 0
+
+    for ws_label, crown_list in claims.items():
+        if len(crown_list) == 1:
+            assignment[ws_label] = crown_list[0]
+            continue
+
+        n_contested += 1
+
+        # Optional: a tree top's own region is never taken from it.
+        if protect_seeds:
+            owner = owner_of_region.get(ws_label)
+            if owner is not None and owner in crown_list:
+                assignment[ws_label] = owner
+                continue
+
+        # Arbitration. The crown id sits in the sort key so equal scores
+        # resolve to the lower id rather than to insertion order.
+        if rule == "height":
+            # taller seed wins → maximise height, hence the negation
+            best = min((-seed_height[cid - 1], cid) for cid in crown_list)
+        elif rule == "distance":
+            cy, cx = reg_cy[ws_label], reg_cx[ws_label]
+            best = min(
+                ((cy - seed_rc[cid - 1][0]) ** 2 +
+                 (cx - seed_rc[cid - 1][1]) ** 2, cid)
+                for cid in crown_list
+            )
+        else:  # similarity
+            rm = reg_mean[ws_label]
+            best = min(
+                (abs(seed_height[cid - 1] - rm), cid) for cid in crown_list
+            )
+
+        assignment[ws_label] = best[1]
+
+    return assignment, n_contested
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # MAIN CLASS
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -347,6 +462,11 @@ class HierarchicalRegionGrower:
       5. Morphological mask — binary_opening to remove flat background
       6. Variance annealing — schedule-based threshold tightening
       7. Numba @njit — accelerated graph build and stat computation
+
+    Seeds grow independently, so two crowns may claim the same watershed
+    region. Contested regions are arbitrated explicitly (see the
+    ``conflict_rule`` argument of :meth:`run_all`), which makes the output
+    reproducible regardless of seed order.
     """
 
     def __init__(self, chm_path: str, smoothing=None):
@@ -365,6 +485,13 @@ class HierarchicalRegionGrower:
         self.reg_n    = None
         self.reg_mean = None
         self.reg_var  = None
+
+        # Per-region centroids (used by conflict rule 'distance')
+        self.reg_cy = None
+        self.reg_cx = None
+
+        # Number of regions claimed by >1 crown in the last run_all()
+        self.n_contested = 0
 
         # CSR graph
         self.row_ptr = None
@@ -429,12 +556,14 @@ class HierarchicalRegionGrower:
         nr = self.num_regions
 
         # Numba-accelerated stat computation + edge extraction
-        reg_n, reg_mean, reg_var, edge_a, edge_b = \
+        reg_n, reg_mean, reg_var, reg_cy, reg_cx, edge_a, edge_b = \
             _build_adjacency_and_stats(labels, self.chm, nr)
 
         self.reg_n    = reg_n
         self.reg_mean = reg_mean
         self.reg_var  = reg_var
+        self.reg_cy   = reg_cy
+        self.reg_cx   = reg_cx
 
         # Count shared border pixels per edge pair
         from collections import Counter
@@ -462,9 +591,11 @@ class HierarchicalRegionGrower:
                 gamma: float = 0.1,
                 anneal_lambda: float = 1.0,
                 max_iters: int = 200,
-                n_jobs: int = 1) -> list[np.ndarray]:
+                conflict_rule: str = "height",
+                protect_seeds: bool = False,
+                n_jobs: int = 1) -> np.ndarray:
         """
-        Full pipeline: watershed → weighted RAG → parallel Welford grows.
+        Full pipeline: watershed → weighted RAG → Welford grows → arbitration.
 
         Parameters
         ----------
@@ -483,15 +614,51 @@ class HierarchicalRegionGrower:
             1.0 = constant (v1 behavior), <1.0 = tightening.
         max_iters : int
             Maximum grow iterations per seed.
+        conflict_rule : {'height', 'distance', 'similarity'}
+            How to arbitrate watershed regions claimed by more than one
+            crown. Watershed gives one region per tree top, so growing
+            merges neighbouring trees and the loser of a mutual claim is
+            absorbed — this is how over-detected tree tops get corrected,
+            and it means the crown count can end up below the tree-top
+            count.
+
+            - ``'height'`` (default) — the taller tree wins.
+            - ``'distance'`` — the nearest seed wins.
+            - ``'similarity'`` — the seed whose height best matches the
+              region's mean height wins.
+
+            Ties are broken by lower crown id, so results are reproducible.
+            The number of contested regions is stored in
+            ``self.n_contested`` after the run.
+        protect_seeds : bool
+            If True, no tree is ever absorbed: every input tree top keeps
+            its own region and yields its own crown. Use when the tree
+            tops are trusted (e.g. field-measured) and merging is not
+            wanted. Default False.
         n_jobs : int
             Number of parallel processes. 1 = sequential.
             -1 = use all available cores.
 
         Returns
         -------
-        masks : list of ndarray[bool]
-            Binary mask for each tree crown.
+        crown_raster : ndarray[int32]
+            Crown id per pixel (0 = background), same shape as the CHM.
+            Crown ids follow the order of *tree_tops_pixels* (1-based);
+            absorbed trees leave no pixels, so ids can be missing.
         """
+        if conflict_rule not in CONFLICT_RULES:
+            raise ValueError(
+                f"conflict_rule must be one of {CONFLICT_RULES}, "
+                f"got {conflict_rule!r}"
+            )
+
+        rows, cols = self.chm.shape
+        for r, c in tree_tops_pixels:
+            if not (0 <= r < rows and 0 <= c < cols):
+                raise ValueError(
+                    f"tree top ({r}, {c}) lies outside the CHM "
+                    f"({rows}×{cols})"
+                )
         # 1) Create marker array
         markers = np.zeros_like(self.chm, dtype=np.int32)
         for idx, (r, c) in enumerate(tree_tops_pixels, start=1):
@@ -536,18 +703,27 @@ class HierarchicalRegionGrower:
                 sid, members = _grow_worker(args)
                 results[sid] = members
 
-        # 6) Convert member sets → label raster directly (no mask list)
-        # Build a lookup: watershed_label → crown_id
+        # 6) Arbitrate regions claimed by more than one crown.
+        # Growing is independent per seed, so overlaps are expected; without
+        # this step the assignment would depend on iteration order.
+        seed_height = np.array(
+            [self.chm[r, c] for r, c in tree_tops_pixels], dtype=np.float64
+        )
+        assignment, n_contested = _resolve_conflicts(
+            results, seed_ids, tree_tops_pixels, seed_height,
+            self.reg_mean, self.reg_cy, self.reg_cx,
+            rule=conflict_rule, protect_seeds=protect_seeds,
+        )
+        self.n_contested = n_contested
+
+        # 7) Convert the assignment → label raster in one vectorized pass.
         labels = self.watershed_labels
         max_wlabel = int(labels.max()) + 1
         ws_to_crown = np.zeros(max_wlabel, dtype=np.int32)
-        for crown_id, sid in enumerate(seed_ids, start=1):
-            member_set = results[sid]
-            for ws_label in member_set:
-                if 0 <= ws_label < max_wlabel:
-                    ws_to_crown[ws_label] = crown_id
+        for ws_label, crown_id in assignment.items():
+            if 0 <= ws_label < max_wlabel:
+                ws_to_crown[ws_label] = crown_id
 
-        # Single vectorized pass: remap watershed labels → crown IDs
         crown_raster = ws_to_crown[labels]
 
         return crown_raster

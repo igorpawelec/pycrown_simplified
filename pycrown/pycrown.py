@@ -413,6 +413,8 @@ class PyCrown:
             gamma: float = 0.1,
             anneal_lambda: float = 1.0,
             max_iters: int = 200,
+            conflict_rule: str = "height",
+            protect_seeds: bool = False,
             n_jobs: int = 1
     ) -> np.ndarray:
         """
@@ -441,13 +443,24 @@ class PyCrown:
             Variance threshold annealing factor. 1.0 = constant.
         max_iters : int
             Maximum grow iterations per seed.
+        conflict_rule : {'height', 'distance', 'similarity'}
+            Arbitration for canopy claimed by more than one crown.
+            'height' (default) gives it to the taller tree, 'distance'
+            to the nearest, 'similarity' to the tree whose height best
+            matches the disputed canopy.
+        protect_seeds : bool
+            If True, every tree top keeps its own crown and none is
+            absorbed by a neighbour. Default False, which lets the
+            growing merge over-detected tree tops.
         n_jobs : int
             Parallel processes. 1 = sequential, -1 = all cores.
 
         Returns
         -------
         crowns : ndarray[int32]
-            Label image: each crown gets value 1..N, background = 0.
+            Label image: crown ids follow tree-top order, background = 0.
+            With merging enabled some ids may be absent, so the crown
+            count can be lower than the tree-top count.
         """
         HierarchicalRegionGrower = _ensure_hrg()
 
@@ -476,6 +489,8 @@ class PyCrown:
             gamma=gamma,
             anneal_lambda=anneal_lambda,
             max_iters=max_iters,
+            conflict_rule=conflict_rule,
+            protect_seeds=protect_seeds,
             n_jobs=n_jobs
         )
 
@@ -483,6 +498,9 @@ class PyCrown:
 
         if not self.quiet:
             n_crowns = len(np.unique(self.crowns)) - 1
-            print(f"  HRG v2: {n_crowns} crowns in {_time.time()-_t0:.2f}s")
+            merged = len(seeds) - n_crowns
+            extra = f", {merged} merged" if merged > 0 else ""
+            print(f"  HRG v2: {n_crowns} crowns{extra} "
+                  f"in {_time.time()-_t0:.2f}s")
 
         return self.crowns
